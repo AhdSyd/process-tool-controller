@@ -1,10 +1,10 @@
 #include "app/console.hpp"
 
-#include <poll.h>
+#include <sys/select.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
-#include <ctime>
 
 namespace ptc::app {
 
@@ -20,25 +20,34 @@ bool Console::take_line(std::string& out) {
 Console::Event Console::wait(std::string& out, std::chrono::milliseconds timeout) {
   if (take_line(out)) return Event::Line;
 
-  const auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout);
-  timespec ts{};
-  ts.tv_sec = static_cast<std::time_t>(secs.count());
-  ts.tv_nsec = static_cast<long>(std::chrono::nanoseconds(timeout - secs).count());
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(wake_fd_, &rfds);
+  if (stdin_open_) FD_SET(STDIN_FILENO, &rfds);
+  const int maxfd = std::max(wake_fd_, STDIN_FILENO);
 
-  pollfd pfd{STDIN_FILENO, POLLIN, 0};
-  const nfds_t nfds = stdin_open_ ? 1 : 0;
-  const int rc = ppoll(&pfd, nfds, &ts, &wait_mask_);
+  timeval tv{};
+  tv.tv_sec = static_cast<decltype(tv.tv_sec)>(timeout.count() / 1000);
+  tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout.count() % 1000) * 1000);
 
-  if (rc < 0) return errno == EINTR ? Event::Interrupted : Event::Timeout;
+  const int rc = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+  if (rc < 0) return errno == EINTR ? Event::Signal : Event::Timeout;
   if (rc == 0) return Event::Timeout;
 
-  if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) {
+  if (FD_ISSET(wake_fd_, &rfds)) {
+    char drain[64];
+    while (read(wake_fd_, drain, sizeof(drain)) > 0) {
+    }  // non-blocking pipe: empty it
+    return Event::Signal;
+  }
+
+  if (stdin_open_ && FD_ISSET(STDIN_FILENO, &rfds)) {
     char buf[256];
     const ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
     if (n > 0) {
       pending_.append(buf, static_cast<std::size_t>(n));
     } else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
-      stdin_open_ = false;  // EOF: treat any unterminated text as a final line
+      stdin_open_ = false;  // EOF: treat unterminated text as a final line
       if (!pending_.empty()) pending_.push_back('\n');
     }
   }

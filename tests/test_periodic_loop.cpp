@@ -1,25 +1,24 @@
 #include <gtest/gtest.h>
 
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <thread>
 
-#include "control/control_loop.hpp"
+#include "control/periodic_loop.hpp"
 
 using namespace std::chrono_literals;
 using ptc::control::Clock;
-using ptc::control::ControlLoop;
-using ptc::control::ControlLoopConfig;
+using ptc::control::PeriodicLoop;
+using ptc::control::PeriodicLoopConfig;
 using ptc::control::TickContext;
 using ptc::control::TickTask;
 
 namespace {
 
-ControlLoopConfig test_config(std::chrono::nanoseconds period) {
-  ControlLoopConfig cfg;
+PeriodicLoopConfig test_config(std::chrono::nanoseconds period) {
+  PeriodicLoopConfig cfg;
   cfg.period = period;
-  cfg.rt.want_fifo = false;  // tests must not depend on RT privileges
+  cfg.rt.want_rt = false;  // tests must not depend on RT privileges
   return cfg;
 }
 
@@ -45,9 +44,9 @@ class RecordingTask final : public TickTask {
 
 }  // namespace
 
-TEST(ControlLoop, TicksAtRoughlyTheConfiguredRate) {
+TEST(PeriodicLoop, TicksAtRoughlyTheConfiguredRate) {
   RecordingTask task;
-  ControlLoop loop(test_config(1ms), task);
+  PeriodicLoop loop(test_config(1ms), task);
   loop.start();
   std::this_thread::sleep_for(300ms);
   loop.stop();
@@ -60,9 +59,9 @@ TEST(ControlLoop, TicksAtRoughlyTheConfiguredRate) {
   EXPECT_EQ(loop.wake_lateness().negative_count(), 0u) << "woke before an absolute deadline";
 }
 
-TEST(ControlLoop, DeadlinesStayOnTheAbsoluteGrid) {
+TEST(PeriodicLoop, DeadlinesStayOnTheAbsoluteGrid) {
   RecordingTask task;
-  ControlLoop loop(test_config(1ms), task);
+  PeriodicLoop loop(test_config(1ms), task);
   loop.start();
   std::this_thread::sleep_for(100ms);
   loop.stop();
@@ -75,10 +74,10 @@ TEST(ControlLoop, DeadlinesStayOnTheAbsoluteGrid) {
   }
 }
 
-TEST(ControlLoop, OverrunsAreCountedAndSkippedNotBurst) {
+TEST(PeriodicLoop, OverrunsAreCountedAndSkippedNotBurst) {
   RecordingTask task;
   task.set_busy(2500us);  // every tick takes 2.5 periods
-  ControlLoop loop(test_config(1ms), task);
+  PeriodicLoop loop(test_config(1ms), task);
   loop.start();
   std::this_thread::sleep_for(200ms);
   loop.stop();
@@ -90,37 +89,36 @@ TEST(ControlLoop, OverrunsAreCountedAndSkippedNotBurst) {
   EXPECT_GE(missed, 2 * (ticks - 1));
   // Skipping keeps executed ticks far below 200 (bursting would approach it).
   EXPECT_LT(ticks, 100u);
-  // Even after skipping, every executed deadline is still on the 1 ms grid.
   for (std::size_t i = 1; i < task.n_; ++i) {
     EXPECT_EQ((task.deadlines_[i] - task.deadlines_[0]) % 1ms, Clock::duration::zero());
   }
 }
 
-TEST(ControlLoop, StopIsIdempotentAndDestructorJoins) {
+TEST(PeriodicLoop, StopIsIdempotentAndDestructorJoins) {
   RecordingTask task;
   {
-    ControlLoop loop(test_config(1ms), task);
+    PeriodicLoop loop(test_config(1ms), task);
     loop.start();
     std::this_thread::sleep_for(20ms);
     loop.stop();
     loop.stop();  // second stop is a no-op
   }
   {
-    ControlLoop loop(test_config(1ms), task);
+    PeriodicLoop loop(test_config(1ms), task);
     loop.start();
     std::this_thread::sleep_for(20ms);
   }  // destructor must stop and join; a leaked joinable thread would terminate()
   SUCCEED();
 }
 
-TEST(ControlLoop, RejectsNonPositivePeriod) {
+TEST(PeriodicLoop, RejectsNonPositivePeriod) {
   RecordingTask task;
-  EXPECT_THROW(ControlLoop(test_config(0ns), task), std::invalid_argument);
+  EXPECT_THROW(PeriodicLoop(test_config(0ns), task), std::invalid_argument);
 }
 
-TEST(ControlLoop, StartTwiceThrows) {
+TEST(PeriodicLoop, StartTwiceThrows) {
   RecordingTask task;
-  ControlLoop loop(test_config(1ms), task);
+  PeriodicLoop loop(test_config(1ms), task);
   loop.start();
   EXPECT_THROW(loop.start(), std::logic_error);
 }
